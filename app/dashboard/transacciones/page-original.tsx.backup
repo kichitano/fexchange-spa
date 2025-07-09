@@ -1,0 +1,513 @@
+"use client"
+
+import { useEffect, useState, useCallback } from "react"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Badge } from "@/components/ui/badge"
+import { 
+  Pause, 
+  Power, 
+  Clock, 
+  Calculator,
+  Settings,
+  Receipt,
+  X
+} from "lucide-react"
+import { transaccionService } from "@/services/transaccion-service"
+import { tipoCambioService } from "@/services/tipo-cambio-service"
+import { clienteService } from "@/services/cliente-service"
+import type { TransaccionDto } from "@/types/transaccion"
+import type { TipoCambioDto } from "@/types/tipo-cambio"
+import type { ClienteDto } from "@/types/cliente"
+import { EstadoTransaccion, TipoCliente } from "@/types/enums"
+import { LoadingSpinner } from "@/components/ui/loading-spinner"
+import { useToast } from "@/hooks/use-toast"
+import { formatCurrency, formatDateTime } from "@/utils/format"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
+import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { ClienteSelectorRapido } from "@/components/transacciones/cliente-selector-rapido"
+
+/**
+ * Tipos para Operaciones Rápidas de Transacciones
+ * 
+ * Interfaces específicas para la funcionalidad de transacciones rápidas
+ * con campos calculados y optimizados para la UI.
+ */
+
+/**
+ * Tipo de cambio seleccionado con par de monedas calculado
+ * Extiende TipoCambioDto con campos adicionales para UI
+ */
+interface TipoCambioSeleccionado extends TipoCambioDto {
+  par_monedas: string // Campo calculado: "USD/PEN", "EUR/PEN", etc.
+}
+
+type TipoOperacion = 'compra' | 'venta'
+
+/**
+ * Resultado de cálculo de transacción
+ * Estructura consistente con DTOs del backend
+ */
+interface CalculoTransaccion {
+  monto_origen: number
+  monto_destino: number
+  tipo_cambio_aplicado: number
+  ganancia: number
+  es_valido: boolean
+  mensaje_error?: string
+}
+
+export default function TransaccionesPage() {
+  // Estados principales
+  const [currentTime, setCurrentTime] = useState(new Date())
+  const [tiposCambio, setTiposCambio] = useState<TipoCambioSeleccionado[]>([])
+  const [transaccionesRecientes, setTransaccionesRecientes] = useState<TransaccionDto[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  
+  // Estados de selección
+  const [tipoCambioSeleccionado, setTipoCambioSeleccionado] = useState<TipoCambioSeleccionado | null>(null)
+  const [tipoOperacion, setTipoOperacion] = useState<TipoOperacion>('compra')
+  
+  // Estados del formulario de transacción
+  const [montoOrigen, setMontoOrigen] = useState('')
+  const [calculo, setCalculo] = useState<CalculoTransaccion | null>(null)
+  const [descuentoPersonalizado, setDescuentoPersonalizado] = useState(false)
+  const [tipoCambioCustom, setTipoCambioCustom] = useState('')
+  
+  // Estados de modales
+  const [showComprobanteDialog, setShowComprobanteDialog] = useState(false)
+  const [showClienteSelector, setShowClienteSelector] = useState(false)
+  const [showCambioPreferencial, setShowCambioPreferencial] = useState(false)
+  
+  const { toast } = useToast()
+
+  // Reloj en tiempo real
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(new Date())
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [])
+
+  // Cargar datos iniciales
+  useEffect(() => {
+    loadData()
+  }, [])
+
+  const loadData = async () => {
+    try {
+      setIsLoading(true)
+      const [tiposResponse, transaccionesResponse] = await Promise.all([
+        tipoCambioService.getActivosPorCasa(1), // Casa de cambio actual
+        transaccionService.obtenerRecientes(10)
+      ])
+      
+      setTiposCambio(tiposResponse.data || [])
+      setTransaccionesRecientes(transaccionesResponse.data || [])
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudieron cargar los datos",
+        variant: "destructive",
+      })
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Calcular conversión automáticamente
+  const calcularConversion = useCallback(async () => {
+    if (!tipoCambioSeleccionado || !montoOrigen || parseFloat(montoOrigen) <= 0) {
+      setCalculo(null)
+      return
+    }
+
+    try {
+      const monto = parseFloat(montoOrigen)
+      const tipoCambio = descuentoPersonalizado 
+        ? parseFloat(tipoCambioCustom) 
+        : (tipoOperacion === 'compra' ? tipoCambioSeleccionado.tipo_compra : tipoCambioSeleccionado.tipo_venta)
+      
+      let montoDestino: number
+      let ganancia: number
+
+      if (tipoOperacion === 'compra') {
+        // Casa compra moneda extranjera, paga en soles
+        montoDestino = monto * tipoCambio
+        ganancia = monto * (tipoCambioSeleccionado.tipo_venta - tipoCambio)
+      } else {
+        // Casa vende moneda extranjera, recibe soles
+        montoDestino = monto / tipoCambio  
+        ganancia = (monto / tipoCambio) * (tipoCambio - tipoCambioSeleccionado.tipo_compra)
+      }
+
+      setCalculo({
+        monto_origen: monto,
+        monto_destino: montoDestino,
+        tipo_cambio_aplicado: tipoCambio,
+        ganancia: ganancia
+      })
+    } catch (error) {
+      setCalculo(null)
+    }
+  }, [tipoCambioSeleccionado, tipoOperacion, montoOrigen, descuentoPersonalizado, tipoCambioCustom])
+
+  useEffect(() => {
+    calcularConversion()
+  }, [calcularConversion])
+
+  const handleProcesarTransaccion = () => {
+    if (!calculo || !tipoCambioSeleccionado) {
+      toast({
+        title: "Error",
+        description: "Complete todos los campos requeridos",
+        variant: "destructive",
+      })
+      return
+    }
+    setShowComprobanteDialog(true)
+  }
+
+  const handleComprobanteOption = (option: 'sin_comprobante' | 'con_comprobante' | 'cancelar') => {
+    setShowComprobanteDialog(false)
+    
+    if (option === 'cancelar') return
+    
+    if (option === 'con_comprobante') {
+      setShowClienteSelector(true)
+    } else {
+      // Procesar sin comprobante
+      procesarTransaccionFinal(null)
+    }
+  }
+
+  const procesarTransaccionFinal = async (clienteId: number | null) => {
+    if (!calculo || !tipoCambioSeleccionado) return
+
+    try {
+      await transaccionService.procesarCambio({
+        clienteId,
+        ventanillaId: 1, // Ventanilla actual
+        monedaOrigenId: tipoCambioSeleccionado.moneda_origen_id,
+        monedaDestinoId: tipoCambioSeleccionado.moneda_destino_id,
+        montoOrigen: calculo.monto_origen,
+        observaciones: descuentoPersonalizado ? `Tipo de cambio preferencial: ${tipoCambioCustom}` : undefined
+      })
+
+      toast({
+        title: "Éxito",
+        description: "Transacción procesada correctamente",
+      })
+
+      // Limpiar formulario
+      setMontoOrigen('')
+      setCalculo(null)
+      setDescuentoPersonalizado(false)
+      setTipoCambioCustom('')
+      
+      // Recargar datos
+      loadData()
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo procesar la transacción",
+        variant: "destructive",
+      })
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <LoadingSpinner />
+      </div>
+    )
+  }
+
+  return (
+    <div className="p-6 space-y-4 max-w-7xl mx-auto">
+      {/* Fila 1: Controles de caja y reloj */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex justify-between items-center">
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm">
+                <Pause className="h-4 w-4 mr-2" />
+                Pausar Caja
+              </Button>
+              <Button variant="destructive" size="sm">
+                <Power className="h-4 w-4 mr-2" />
+                Cerrar Caja
+              </Button>
+            </div>
+            <div className="flex items-center gap-4">
+              <div className="text-sm text-muted-foreground">
+                {currentTime.toLocaleDateString('es-PE', { 
+                  weekday: 'long', 
+                  year: 'numeric', 
+                  month: 'long', 
+                  day: 'numeric' 
+                })}
+              </div>
+              <div className="flex items-center gap-2 text-lg font-mono">
+                <Clock className="h-5 w-5" />
+                {currentTime.toLocaleTimeString('es-PE', { 
+                  hour12: true,
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit'
+                })}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Fila 2: Selector de tipos de cambio */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="mb-3">
+            <h3 className="font-semibold">Tipos de Cambio Disponibles</h3>
+          </div>
+          <ScrollArea className="h-32 w-full rounded-md border">
+            <div className="p-2">
+              {tiposCambio.map((tipo) => (
+                <div
+                  key={tipo.id}
+                  className={`grid grid-cols-4 gap-4 p-3 rounded-lg border mb-2 cursor-pointer transition-colors ${
+                    tipoCambioSeleccionado?.id === tipo.id ? 'bg-primary/10 border-primary' : 'hover:bg-muted/50'
+                  }`}
+                  onClick={() => setTipoCambioSeleccionado(tipo)}
+                >
+                  <div className="font-medium">{tipo.par_monedas}</div>
+                  <div className="text-center">
+                    <Button
+                      variant={tipoCambioSeleccionado?.id === tipo.id && tipoOperacion === 'compra' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setTipoCambioSeleccionado(tipo)
+                        setTipoOperacion('compra')
+                      }}
+                    >
+                      Compra: {tipo.tipo_compra.toFixed(4)}
+                    </Button>
+                  </div>
+                  <div className="text-center">
+                    <Button
+                      variant={tipoCambioSeleccionado?.id === tipo.id && tipoOperacion === 'venta' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setTipoCambioSeleccionado(tipo)
+                        setTipoOperacion('venta')
+                      }}
+                    >
+                      Venta: {tipo.tipo_venta.toFixed(4)}
+                    </Button>
+                  </div>
+                  <div className="text-center text-sm text-muted-foreground">
+                    {tipoOperacion === 'compra' ? 'Compramos' : 'Vendemos'} {tipo.moneda_origen.codigo}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        </CardContent>
+      </Card>
+
+      {/* Fila 3: Formulario de transacción */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="grid grid-cols-1 lg:grid-cols-6 gap-4 items-end">
+            <div>
+              <Label htmlFor="monto">Monto a {tipoOperacion === 'compra' ? 'recibir' : 'entregar'}</Label>
+              <Input
+                id="monto"
+                type="number"
+                placeholder="0.00"
+                value={montoOrigen}
+                onChange={(e) => setMontoOrigen(e.target.value)}
+                className="text-lg"
+              />
+            </div>
+            
+            <div>
+              <Label>Operación</Label>
+              <div className="p-2 border rounded text-center bg-muted">
+                {tipoCambioSeleccionado ? (
+                  <span className="font-medium">
+                    {tipoOperacion === 'compra' ? 'COMPRA' : 'VENTA'} {tipoCambioSeleccionado.par_monedas}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground">Seleccione tipo de cambio</span>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <Label>Tipo de Cambio</Label>
+              <div className="flex gap-1">
+                <Input
+                  value={descuentoPersonalizado ? tipoCambioCustom : (calculo?.tipo_cambio_aplicado?.toFixed(4) || '')}
+                  onChange={(e) => setTipoCambioCustom(e.target.value)}
+                  disabled={!descuentoPersonalizado}
+                  className="text-center"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowCambioPreferencial(true)}
+                  disabled={!tipoCambioSeleccionado}
+                >
+                  <Settings className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+
+            <div>
+              <Label>Resultado</Label>
+              <Input
+                value={calculo ? formatCurrency(calculo.monto_destino, tipoCambioSeleccionado?.moneda_destino.codigo) : ''}
+                disabled
+                className="text-lg font-medium text-center"
+              />
+            </div>
+
+            <div>
+              <Label>Ganancia</Label>
+              <Input
+                value={calculo ? formatCurrency(calculo.ganancia, 'PEN') : ''}
+                disabled
+                className="text-center text-green-600 font-medium"
+              />
+            </div>
+
+            <div>
+              <Button 
+                onClick={handleProcesarTransaccion}
+                disabled={!calculo}
+                className="w-full"
+                size="lg"
+              >
+                <Receipt className="h-4 w-4 mr-2" />
+                Procesar
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Fila 4: Últimas transacciones */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="mb-3">
+            <h3 className="font-semibold">Últimas Transacciones</h3>
+          </div>
+          <ScrollArea className="h-48 w-full rounded-md border">
+            <div className="p-2">
+              {transaccionesRecientes.map((transaccion) => (
+                <div key={transaccion.id} className="grid grid-cols-6 gap-4 p-3 border-b last:border-b-0 text-sm">
+                  <div className="font-medium">{transaccion.numero_transaccion}</div>
+                  <div>{formatDateTime(transaccion.created_at)}</div>
+                  <div>
+                    {formatCurrency(transaccion.monto_origen, transaccion.moneda_origen?.codigo)} →{" "}
+                    {formatCurrency(transaccion.monto_destino, transaccion.moneda_destino?.codigo)}
+                  </div>
+                  <div>{transaccion.tipo_cambio_aplicado.toFixed(4)}</div>
+                  <div className="text-green-600">{formatCurrency(transaccion.ganancia, 'PEN')}</div>
+                  <div>
+                    <Badge 
+                      variant={transaccion.estado === EstadoTransaccion.COMPLETADA ? 'default' : 'secondary'}
+                      className="text-xs"
+                    >
+                      {transaccion.estado}
+                    </Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        </CardContent>
+      </Card>
+
+      {/* Dialog: Opciones de comprobante */}
+      <Dialog open={showComprobanteDialog} onOpenChange={setShowComprobanteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>¿Cómo desea procesar la transacción?</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <Button onClick={() => handleComprobanteOption('sin_comprobante')}>
+              Sin Comprobante
+            </Button>
+            <Button onClick={() => handleComprobanteOption('con_comprobante')}>
+              Con Comprobante
+            </Button>
+            <Button variant="outline" onClick={() => handleComprobanteOption('cancelar')}>
+              Cancelar
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog: Cambio preferencial */}
+      <Dialog open={showCambioPreferencial} onOpenChange={setShowCambioPreferencial}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cambio Preferencial</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div>
+              <Label>Tipo de cambio actual</Label>
+              <Input
+                value={tipoCambioSeleccionado ? 
+                  (tipoOperacion === 'compra' ? tipoCambioSeleccionado.tipo_compra : tipoCambioSeleccionado.tipo_venta).toFixed(4) 
+                  : ''
+                }
+                disabled
+              />
+            </div>
+            <div>
+              <Label>Tipo de cambio preferencial</Label>
+              <Input
+                type="number"
+                step="0.0001"
+                placeholder="0.0000"
+                value={tipoCambioCustom}
+                onChange={(e) => setTipoCambioCustom(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowCambioPreferencial(false)}>
+              Cancelar
+            </Button>
+            <Button 
+              onClick={() => {
+                setDescuentoPersonalizado(true)
+                setShowCambioPreferencial(false)
+              }}
+              disabled={!tipoCambioCustom}
+            >
+              Aplicar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog: Selector de cliente */}
+      <ClienteSelectorRapido
+        open={showClienteSelector}
+        onOpenChange={setShowClienteSelector}
+        onClienteSeleccionado={(clienteId) => {
+          setShowClienteSelector(false)
+          procesarTransaccionFinal(clienteId)
+        }}
+      />
+    </div>
+  )
+}

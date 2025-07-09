@@ -1,0 +1,382 @@
+"use client"
+
+import { useState } from "react"
+import { TransaccionProvider } from "@/contexts/transaccion-context"
+import { useTransaccionesOperacion } from "@/hooks/useTransaccionesOperacion"
+import { useHistorialTransacciones } from "@/hooks/useHistorialTransacciones"
+import { ControlesCaja } from "@/components/transacciones/controles-caja"
+import { SelectorTiposCambio } from "@/components/transacciones/selector-tipos-cambio"
+import { FormularioTransaccion } from "@/components/transacciones/formulario-transaccion"
+import { HistorialTransacciones } from "@/components/transacciones/historial-transacciones"
+import { ClienteSelectorRapido } from "@/components/transacciones/cliente-selector-rapido"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { useToast } from "@/hooks/use-toast"
+import { Receipt, X } from "lucide-react"
+
+/**
+ * Página Principal de Transacciones Reestructurada
+ * 
+ * Interfaz optimizada para operaciones rápidas de cambio de moneda.
+ * Dividida en 4 secciones principales para máxima eficiencia operativa.
+ * 
+ * Estructura:
+ * 1. Controles de caja y reloj en tiempo real
+ * 2. Selector de tipos de cambio con operaciones
+ * 3. Formulario de transacción con cálculos automáticos
+ * 4. Historial de transacciones recientes
+ */
+
+function TransaccionesPageContent() {
+  // Estados de modales
+  const [showComprobanteDialog, setShowComprobanteDialog] = useState(false)
+  const [showClienteSelector, setShowClienteSelector] = useState(false)
+  const [showCambioPreferencial, setShowCambioPreferencial] = useState(false)
+  const [nuevoTipoCambio, setNuevoTipoCambio] = useState('')
+
+  const { toast } = useToast()
+
+  // Hooks personalizados
+  const {
+    // Estados
+    tiposCambio,
+    tipoCambioSeleccionado,
+    tipoOperacion,
+    montoOrigen,
+    calculo,
+    isLoading: isLoadingOperacion,
+    usarTipoCambioPersonalizado,
+    tipoCambioCustom,
+    puedeProcessar,
+    
+    // Acciones
+    setMontoOrigen,
+    seleccionarTipoCambio,
+    aplicarTipoCambioPreferencial,
+    resetearTipoCambioPreferencial,
+    procesarTransaccion,
+    cargarTiposCambio
+  } = useTransaccionesOperacion()
+
+  const {
+    // Estados
+    transacciones,
+    isLoading: isLoadingHistorial,
+    ultimaActualizacion,
+    
+    // Acciones
+    recargarTransacciones
+  } = useHistorialTransacciones({
+    limite: 10,
+    autoRefresh: false
+  })
+
+  /**
+   * Maneja el inicio del proceso de transacción
+   */
+  const handleProcesarTransaccion = () => {
+    if (!puedeProcessar) {
+      toast({
+        title: "Error",
+        description: "Complete todos los campos requeridos",
+        variant: "destructive",
+      })
+      return
+    }
+    setShowComprobanteDialog(true)
+  }
+
+  /**
+   * Maneja la selección del tipo de comprobante
+   */
+  const handleComprobanteOption = (option: 'sin_comprobante' | 'con_comprobante' | 'cancelar') => {
+    setShowComprobanteDialog(false)
+    
+    if (option === 'cancelar') return
+    
+    if (option === 'con_comprobante') {
+      setShowClienteSelector(true)
+    } else {
+      // Procesar sin comprobante (cliente ocasional)
+      procesarTransaccionFinal(undefined, undefined)
+    }
+  }
+
+  /**
+   * Procesa la transacción final con los datos del cliente
+   */
+  const procesarTransaccionFinal = async (clienteId?: number, clienteTemp?: any) => {
+    try {
+      const exito = await procesarTransaccion(clienteId, clienteTemp)
+      
+      if (exito) {
+        // Recargar historial después de procesar
+        await recargarTransacciones()
+        await cargarTiposCambio() // Recargar tipos de cambio por si cambiaron
+      }
+    } catch (error) {
+      console.error('Error procesando transacción:', error)
+    }
+  }
+
+  /**
+   * Maneja la selección de cliente
+   */
+  const handleClienteSeleccionado = (cliente: any) => {
+    setShowClienteSelector(false)
+    procesarTransaccionFinal(cliente.id, undefined)
+  }
+
+  /**
+   * Maneja el registro de cliente temporal
+   */
+  const handleClienteTemporalRegistrado = (clienteTemp: any) => {
+    setShowClienteSelector(false)
+    procesarTransaccionFinal(undefined, clienteTemp)
+  }
+
+  /**
+   * Abre el modal de tipo de cambio preferencial
+   */
+  const handleAbrirCambioPreferencial = () => {
+    if (!tipoCambioSeleccionado) {
+      toast({
+        title: "Error",
+        description: "Seleccione un tipo de cambio primero",
+        variant: "destructive",
+      })
+      return
+    }
+    setNuevoTipoCambio(tipoCambioCustom || (
+      tipoOperacion === 'compra' 
+        ? tipoCambioSeleccionado.tipo_compra.toString()
+        : tipoCambioSeleccionado.tipo_venta.toString()
+    ))
+    setShowCambioPreferencial(true)
+  }
+
+  /**
+   * Aplica el tipo de cambio preferencial
+   */
+  const handleAplicarCambioPreferencial = () => {
+    const valor = parseFloat(nuevoTipoCambio)
+    if (isNaN(valor) || valor <= 0) {
+      toast({
+        title: "Error",
+        description: "Ingrese un tipo de cambio válido",
+        variant: "destructive",
+      })
+      return
+    }
+    
+    aplicarTipoCambioPreferencial(nuevoTipoCambio)
+    setShowCambioPreferencial(false)
+    
+    toast({
+      title: "Éxito",
+      description: "Tipo de cambio preferencial aplicado",
+    })
+  }
+
+  /**
+   * Resetea el tipo de cambio preferencial
+   */
+  const handleResetearCambioPreferencial = () => {
+    resetearTipoCambioPreferencial()
+    setShowCambioPreferencial(false)
+    
+    toast({
+      title: "Información",
+      description: "Tipo de cambio restablecido al oficial",
+    })
+  }
+
+  /**
+   * Obtiene las monedas para mostrar en el formulario
+   */
+  const obtenerMonedasFormulario = () => {
+    if (!tipoCambioSeleccionado) {
+      return { monedaOrigen: '', monedaDestino: '' }
+    }
+    
+    return {
+      monedaOrigen: tipoCambioSeleccionado.moneda_origen?.codigo || '',
+      monedaDestino: tipoCambioSeleccionado.moneda_destino?.codigo || ''
+    }
+  }
+
+  const { monedaOrigen, monedaDestino } = obtenerMonedasFormulario()
+
+  return (
+    <div className="p-6 space-y-4 max-w-7xl mx-auto">
+      {/* Fila 1: Controles de caja y reloj */}
+      <ControlesCaja
+        onPausarCaja={() => {
+          toast({
+            title: "Información",
+            description: "Funcionalidad de pausar caja en desarrollo",
+          })
+        }}
+        onCerrarCaja={() => {
+          toast({
+            title: "Información", 
+            description: "Funcionalidad de cerrar caja en desarrollo",
+          })
+        }}
+      />
+
+      {/* Fila 2: Selector de tipos de cambio */}
+      <SelectorTiposCambio
+        tiposCambio={tiposCambio}
+        tipoCambioSeleccionado={tipoCambioSeleccionado}
+        tipoOperacion={tipoOperacion}
+        isLoading={isLoadingOperacion}
+        onSeleccionar={seleccionarTipoCambio}
+      />
+
+      {/* Fila 3: Formulario de transacción */}
+      <FormularioTransaccion
+        montoOrigen={montoOrigen}
+        calculo={calculo}
+        tipoOperacion={tipoOperacion}
+        usarTipoCambioPersonalizado={usarTipoCambioPersonalizado}
+        tipoCambioCustom={tipoCambioCustom}
+        monedaOrigen={monedaOrigen}
+        monedaDestino={monedaDestino}
+        puedeProcessar={puedeProcessar}
+        onMontoChange={setMontoOrigen}
+        onAbrirCambioPreferencial={handleAbrirCambioPreferencial}
+        onProcesarTransaccion={handleProcesarTransaccion}
+      />
+
+      {/* Fila 4: Historial de transacciones */}
+      <HistorialTransacciones
+        transacciones={transacciones}
+        isLoading={isLoadingHistorial}
+        ultimaActualizacion={ultimaActualizacion}
+        onRecargar={recargarTransacciones}
+        onVerDetalle={(transaccion) => {
+          toast({
+            title: "Información",
+            description: `Ver detalles de transacción ${transaccion.numero_transaccion}`,
+          })
+        }}
+      />
+
+      {/* Modal de selección de comprobante */}
+      <Dialog open={showComprobanteDialog} onOpenChange={setShowComprobanteDialog}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Receipt className="h-5 w-5" />
+              Tipo de Comprobante
+            </DialogTitle>
+          </DialogHeader>
+          
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Seleccione el tipo de comprobante para esta transacción:
+            </p>
+            
+            <div className="space-y-2">
+              <Button 
+                className="w-full justify-start" 
+                onClick={() => handleComprobanteOption('sin_comprobante')}
+              >
+                Sin Comprobante (Cliente Ocasional)
+              </Button>
+              <Button 
+                variant="outline" 
+                className="w-full justify-start"
+                onClick={() => handleComprobanteOption('con_comprobante')}
+              >
+                Con Comprobante (Seleccionar Cliente)
+              </Button>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              onClick={() => handleComprobanteOption('cancelar')}
+            >
+              <X className="h-4 w-4 mr-2" />
+              Cancelar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Modal de selección de cliente */}
+      <ClienteSelectorRapido
+        open={showClienteSelector}
+        onOpenChange={setShowClienteSelector}
+        onClienteSeleccionado={handleClienteSeleccionado}
+        onClienteTemporalRegistrado={handleClienteTemporalRegistrado}
+      />
+
+      {/* Modal de tipo de cambio preferencial */}
+      <Dialog open={showCambioPreferencial} onOpenChange={setShowCambioPreferencial}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>Tipo de Cambio Preferencial</DialogTitle>
+          </DialogHeader>
+          
+          <div className="space-y-4">
+            {tipoCambioSeleccionado && (
+              <div className="p-3 bg-muted rounded-lg">
+                <div className="text-sm">
+                  <div>Par: {tipoCambioSeleccionado.par_monedas}</div>
+                  <div>Operación: {tipoOperacion === 'compra' ? 'Compra' : 'Venta'}</div>
+                  <div>T.C. Oficial: {
+                    tipoOperacion === 'compra' 
+                      ? tipoCambioSeleccionado.tipo_compra 
+                      : tipoCambioSeleccionado.tipo_venta
+                  }</div>
+                </div>
+              </div>
+            )}
+            
+            <div className="space-y-2">
+              <Label htmlFor="nuevo-tipo-cambio">Nuevo Tipo de Cambio</Label>
+              <Input
+                id="nuevo-tipo-cambio"
+                type="number"
+                step="0.0001"
+                placeholder="0.0000"
+                value={nuevoTipoCambio}
+                onChange={(e) => setNuevoTipoCambio(e.target.value)}
+                className="font-mono text-right"
+              />
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button 
+              variant="outline" 
+              onClick={handleResetearCambioPreferencial}
+            >
+              Restablecer
+            </Button>
+            <Button onClick={handleAplicarCambioPreferencial}>
+              Aplicar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+/**
+ * Página de transacciones con proveedor de contexto
+ */
+export default function TransaccionesPage() {
+  return (
+    <TransaccionProvider>
+      <TransaccionesPageContent />
+    </TransaccionProvider>
+  )
+}
